@@ -4,6 +4,9 @@ import csv
 import re
 from itertools import chain
 from typing import Dict, List, Tuple, Any
+import pickle
+# import operator
+
 
 data = '/Users/david/PycharmProjects/TIRKS/tirks_data/'
 source = '/Users/david/PycharmProjects/TIRKS/'
@@ -540,7 +543,7 @@ def process_tl1():
                 pass
         else:
             lo_dupes.append(resp)
-    return do_resp
+    return do_resp, lo_tl1
 
 
 def circuits():
@@ -549,25 +552,25 @@ def circuits():
     :return:
     """
     path = []
-    for d in dcs:
+    for d in dcs:  # look only at slots formatted ###-##
         child = False
         if re.match(r'^[0-9]{3}-[0-9]{2}', dcs[d].slot):
-            slot = '0' + dcs[d].slot
-            if slot in do_resp:
-                for t in t3z:
-                    if t3z[t].ckt_id and t3z[t].ckt_id == dcs[d].child_circuit:
+            slot = '0' + dcs[d].slot  # append a 0 to conform to the TL1 format
+            if slot in do_resp:  # look for the TL1 response indexed with the DCS ####-##
+                for t in t3z:  # search the T3Z children for a child_circuit that matches
+                    if t3z[t].ckt_id and (t3z[t].ckt_id == dcs[d].child_circuit):  # if it's not blank and matches...
                         child = True
-                        item = t3z[t].item
-                        idx = item[0:item.index('.') + 1]
-                        if idx in t3z:
-                            level_0 = sorted([t3z[idx].aclli, t3z[idx].zclli])
+                        item = t3z[t].item  # Grab the matched T3Z circuits item (the index used for the T3z children)
+                        idx = item[0:item.index('.') + 1]  # Strip it down to reference the level 0 item index (ex. 1.)
+                        if idx in t3z:  # if the level 0 index exists use the a/zcllis as intermediate DCS for the circuit
+                            level_0 = sorted([t3z[idx].aclli, t3z[idx].zclli])  # sort them to order the ends/middles
                             level_1 = sorted([dcs[d].a_clli, dcs[d].z_clli])
-                            path.append([level_1[0], level_0[0], level_0[1], level_1[1]])
-                            if TID in level_0:
-                                if path[0].index(TID) == 2:
+                            path.append([level_1[0], level_0[0], level_0[1], level_1[1]])  # Start to build the path
+                            if TID in level_0:  # is our DCS in the middle of the circuit?
+                                if path[0].index(TID) == 2:  # determine which side is it on and build the path
                                     tl1_slot = '0' + dcs[d].slot
-                                    [path[0].insert(-1, x) for x in
-                                     [do_resp[tl1_slot].PMAID, dcs[d].services, tl1_slot]]
+                                    # include the TL1 port manager access ID, the DCS service and slot
+                                    [path[0].insert(-1, x) for x in [do_resp[tl1_slot].PMAID, dcs[d].services, tl1_slot]]
                                     print(
                                         f'{"T3Z":4} {dcs[d].slot:10} {path[0][0]} <--> {path[0][1]} <==> {path[0][2]}'
                                         f'<--|{path[0][3]}-({path[0][4]})-{path[0][5]}|--> {path[0][6]}')
@@ -582,7 +585,7 @@ def circuits():
                                     break
                 for s in st1:
                     path = []
-                    if st1[s].ckt_id and st1[s].ckt_id == dcs[d].child_circuit:
+                    if st1[s].ckt_id and (st1[s].ckt_id == dcs[d].child_circuit):
                         child = True
                         item = st1[s].item
                         idx = item[0:item.index('.') + 1]
@@ -644,7 +647,70 @@ def build_xcon() -> List:
         x_writer.writerow(['Type', 'A Facility', 'A Circuit ID', 'Z Circuit ID', 'Z Facility'])
         for xcon in lo_cc:
             x_writer.writerow(xcon)
+
+    with open('xcon.pickle', 'wb') as pfile:
+        pickle.dump(xcon, pfile)
     return lo_cc
+
+
+def enhance_xcon():
+    """
+
+    :return:
+    """
+    xcon_header = ['Type', 'A Port', 'A Circuit', 'Z Circuit', 'Z Port', 'A SDF', 'Z SDF', 'A PGC', 'Z PGC']
+    pgc_header = ['A PGC', 'Circuits', 'Z PGC']
+    do_sts = {}
+
+    for x in tl1_list:
+        try:
+            if 'START=SDF' in x[0]:
+                temp = x[0].replace('"', '').replace(":", ',').replace('=', ',')
+                temp = temp.split(',')
+                if temp[0]:
+                    do_sts[temp[2]] = {temp[3].lower(): int(temp[4].replace('SDF-', '')),
+                                       temp[5].lower(): int(temp[6].replace('SDF-', '')),
+                                       'type': temp[0]}  # Include the SDF lower & upper range
+        except Exception as ex:
+            pass
+
+    lo_xcon_pgc = []  # xcon list with PGC info
+    for x in xcon:
+        a_pgc = ''
+        z_pgc = ''
+        a_sdf, a_ds1 = x[1].split('-')  # SDF is always 3 digits, DS1 is always 2 digits
+        a_sdf = int(a_sdf)  # this will be in the range of the PCG
+        z_sdf, z_ds1 = x[4].split('-')  # SDF is always 3 digits, DS1 is always 2 digits
+        z_sdf = int(z_sdf)  # this will be in the range of the PCG
+        for sts in do_sts:
+            if do_sts[sts]['start'] <= a_sdf <= do_sts[sts]['end']:
+                a_pgc = sts
+            if do_sts[sts]['start'] <= z_sdf <= do_sts[sts]['end']:
+                z_pgc = sts
+            if a_pgc and z_pgc:
+                lo_xcon_pgc.append([*x, f'{a_sdf:03}', f'{z_sdf:03}', a_pgc, z_pgc])
+                break
+
+    pgc_pair = []  # used to get circuit counters between PGCs
+    for x in lo_xcon_pgc:
+        temp = sorted([x[7], x[8]])
+        pgc_pair.append(temp[0] + ':' + temp[1])
+    co_pgc = Counter(x for x in pgc_pair)
+
+    print(f'\nCreated the circuit cross connect report: BHLHPABEK31_CIRCUIT_XCON.csv')
+    with open('BHLHPABEK31_CIRCUIT_XCON.csv', 'w') as xfile:
+        writer = csv.writer(xfile)
+        writer.writerow(xcon_header)
+        writer.writerows(lo_xcon_pgc)
+
+    print(f'\nCreated the PGC cross connect report: BHLHPABEK31_PGC_XCON.csv')
+    with open('BHLHPABEK31_PGC_XCON.csv', 'w') as x_file:
+        writer = csv.writer(x_file)
+        writer.writerow(pgc_header)
+        for pair in co_pgc:
+            a, z = pair.split(':')
+            writer.writerow([a, co_pgc[pair], z])
+    return
 
 
 def main():
@@ -652,8 +718,10 @@ def main():
     global st1
     global t3z
     global do_resp
+    global tl1_list
+    global xcon
     dcs, st1, t3z, dcs_header, st1_header, t3z_header = process_dcs()
-    do_resp = process_tl1()
+    do_resp, tl1_list = process_tl1()
 
 
     lo_fc = []
@@ -668,8 +736,13 @@ def main():
     print(f'TL1 responses read: {len(do_resp)}\n\n')
 
     circuits()
-    xcon: List = build_xcon()
 
+    # load from pickle instead of creating the xcon
+    # xcon: List = build_xcon()
+    with open('xcon.pickle', 'rb') as pfile:
+        xcon = pickle.load(pfile)
+
+    enhance_xcon()  # create the circuit cross connect and PGC cross connect reports
 
 if __name__ == '__main__':
     # sys.exit(main(sys.argv)) # used to give a better look to exists
